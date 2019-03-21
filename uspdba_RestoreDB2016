@@ -1,0 +1,483 @@
+USE [DBA]
+GO
+/****** Object:  StoredProcedure [dbo].[uspdba_RestoreDB2016]    Script Date: 20/03/2019 14:17:18 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+****** sp2 tested ********
+
+CREATE OR ALTER PROCEDURE [dbo].[uspdba_RestoreDB2016] ( 
+@backupPathFull nvarchar(max) = N'forgot something?' --default value --N'\\MIGSQLBK01\SQLBackups\Daily'
+, @backupPathDiff nvarchar(max) = N'forgot something?' --default value --N'\\MIGSQLBK01\SQLBackups\DailyDiff'
+,@liveServerName nvarchar(128) = N'forgot something?'  --live server name from where the backup is taken
+,@dbNmSource nvarchar(128) = N'forgot something?' --default value 
+,@dbNmTarget nvarchar(128) = N'forgot something?' --default value 
+,@NewDB nvarchar(1) = N'forgot something?' --default value 
+)
+AS
+/***************************************************************************************************
+
+Restore a database using Full backup + DIFF backup (if exist)
+
+****************************************************************************************************/
+
+
+--execute dbo.uspdba_RestoreDB2016 @NewDB = 'Y', @backupPathFull = '\\MIGSQLBK01\SQLBackups\Finance\Daily', @backupPathDiff = '\\MIGSQLBK01\SQLBackups\Finance\DailyDiff', @dbNmSource = 'servicedesk', @liveServerName = 'migvmnPRDsql01', @dbNmTarget = 'servicedesk_dev';
+
+IF (@liveServerName = 'forgot something?') BEGIN 
+     print 'The Name of the Server was not provided, the script will be terminated now!' 
+     print 'execute dbo.uspdba_RestoreDB2016 @NewDB = ''Y'', @backupPathFull = ''\\MIGSQLBK01\SQLBackups\Finance\Daily'', @backupPathDiff = ''\\MIGSQLBK01\SQLBackups\Finance\DailyDiff'', @dbNmSource = ''servicedesk'', @liveServerName = ''migvmnPRDsql01'', @dbNmTarget = ''servicedesk_dev''';
+     RETURN 
+END -- ServerName must be provided
+
+IF (@dbNmSource = 'forgot something?') BEGIN 
+     print 'Please, provide LIVE Database name: ' 
+     print 'execute dbo.uspdba_RestoreDB2016 @NewDB = ''Y'', @backupPathFull = ''\\MIGSQLBK01\SQLBackups\Finance\Daily'', @backupPathDiff = ''\\MIGSQLBK01 \SQLBackups\Finance\DailyDiff'', @dbNmSource = ''servicedesk'', @liveServerName = ''migvmnPRDsql01'', @dbNmTarget = ''servicedesk_dev''';
+     RETURN 
+END -- if the first db name is forgotten the sp will terminate
+
+IF (@dbNmTarget = 'forgot something?') BEGIN 
+     print 'Please, provide DEV database name ' 
+     print 'execute dbo.uspdba_RestoreDB2016 @NewDB = ''Y'', @backupPathFull = ''\\MIGSQLBK01\SQLBackups\Finance\Daily'', @backupPathDiff = ''\\MIGSQLBK01 \SQLBackups\Finance\DailyDiff'', @dbNmSource = ''servicedesk'', @liveServerName = ''migvmnPRDsql01'', @dbNmTarget = ''servicedesk_dev''';
+     RETURN 
+END -- if the first db name is forgotten the sp will terminate
+
+IF (@NewDB = 'forgot something?') BEGIN 
+     print 'Is this a new Database on this Server? Y/N' 
+     print 'execute dbo.uspdba_RestoreDB2016 @NewDB = ''Y'', @backupPathFull = ''\\MIGSQLBK01\SQLBackups\Finance\Daily'', @backupPathDiff = ''\\MIGSQLBK01 \SQLBackups\Finance\DailyDiff'', @dbNmSource = ''servicedesk'', @liveServerName = ''migvmnPRDsql01'', @dbNmTarget = ''servicedesk_dev''';
+     RETURN 
+END -- if the first db name is forgotten the sp will terminate
+
+declare @dirTree as nvarchar(max);
+declare @dirFullTree as nvarchar(max);
+declare @dirDiffTree as nvarchar(max);
+
+IF OBJECT_ID (N'tempdb.dbo.#headerOnly', N'U') IS NOT NULL DROP TABLE #headerOnly; 
+CREATE TABLE #headerOnly (BackupName nvarchar(128), BackupDescription nvarchar(255), BackupType smallint, 
+				--Backup type: 1 = FULL;2 = Transaction log;4 = File;5 = Differential database;6 = Differential file;7 = Partial;8 = Differential partial 
+				ExpirationDate datetime, Compressed bit, Position smallint, DeviceType tinyint, 
+				UserName nvarchar(128), ServerName nvarchar(128), DatabaseName nvarchar(128), DatabaseVersion int, 
+				DatabaseCreationDate datetime, BackupSize numeric(20,0), FirstLSN numeric(25,0), LastLSN numeric(25,0), 
+				CheckpointLSN numeric(25,0), DatabaseBackupLSN numeric(25,0), BackupStartDate datetime, BackupFinishDate datetime, 
+				SortOrder smallint, CodePage smallint, UnicodeLocaleId int, UnicodeComparisonStyle int, 
+				CompatibilityLevel tinyint, SoftwareVendorId int, SoftwareVersionMajor int, 
+				SoftwareVersionMinor int, SoftwareVersionBuild int, MachineName nvarchar(128), Flags int, 
+				BindingID uniqueidentifier, RecoveryForkID uniqueidentifier, Collation nvarchar(128), FamilyGUID uniqueidentifier, 
+				HasBulkLoggedData bit, IsSnapshot bit, IsReadOnly bit, IsSingleUser bit, 
+				HasBackupChecksums bit, IsDamaged bit, BeginsLogChain bit, HasIncompleteMetaData bit, 
+				IsForceOffline bit, IsCopyOnly bit, FirstRecoveryForkID uniqueidentifier, ForkPointLSN numeric(25,0), 
+				RecoveryModel nvarchar(60), DifferentialBaseLSN numeric(25,0), DifferentialBaseGUID uniqueidentifier, 
+				BackupTypeDescription nvarchar(60), BackupSetGUID uniqueidentifier
+/*SQL2008*/     ,CompressedBackupSize bigint
+/*SQL2014*/     ,Containment tinyint
+/*SQL2014sp1*/  ,KeyAlgorithm nvarchar(32), EncryptorThumbprint varbinary(20), EncryptorType nvarchar(32) 
+); 
+
+IF OBJECT_ID (N'tempdb.dbo.#fileListOnly', N'U') IS NOT NULL 
+DROP TABLE #fileListOnly; 
+CREATE TABLE #fileListOnly ( 
+                  id int identity(1,1), 
+                  LogicalName nvarchar(128), PhysicalName nvarchar(260), Type char(1), FileGroupName nvarchar(128), Size numeric(20,0), 
+                  MaxSize numeric(20,0), FileId bigint, CreateLSN numeric(25,0), DropLSN numeric(25,0), UniqueId uniqueidentifier, 
+                  ReadOnlyLSN numeric(25,0), ReadWriteLSN numeric(25,0), BackupSizeInBytes bigint, SourceBlockSize int, 
+                  FileGroupId int, LogGroupGUID uniqueidentifier, DifferentialBaseLSN numeric(25,0), DifferentialBaseGUID uniqueidentifier, 
+                  IsReadOnly bit, IsPresent bit
+/*SQL2008 R2*/    ,TDEThumbprint varbinary(32)
+/*SQL2016*/       ,SnapshotURL nvarchar(360)
+		); 
+
+IF OBJECT_ID (N'tempdb.dbo.#fullBackup', N'U') IS NOT NULL DROP TABLE #fullBackup;
+CREATE TABLE #fullBackup (
+ id int identity(1,1)
+ ,IsDamaged bit
+ ,HasIncompleteMetaData bit
+ ,fName nvarchar(255)
+ ,BackupType smallint
+ ,BackupStartDate datetime
+ ,FirstLSN numeric(25,0)
+ ,LastLSN numeric(25,0)
+ ,CheckpointLSN numeric(25,0)
+ ,DatabaseBackupLSN numeric(25,0)
+ ,DifferentialBaseLSN numeric(25,0)
+ ,RecoveryForkID uniqueidentifier
+ ,FirstRecoveryForkID uniqueidentifier
+, ForkPointLSN numeric(25,0)
+ );
+
+
+ IF OBJECT_ID (N'tempdb.dbo.#diffBackup', N'U') IS NOT NULL DROP TABLE #diffBackup;
+CREATE TABLE #diffBackup (
+ id int identity(1,1)
+ ,IsDamaged bit
+ ,HasIncompleteMetaData bit
+ ,fName nvarchar(255)
+ ,BackupType smallint
+ ,BackupStartDate datetime
+ ,FirstLSN numeric(25,0)
+ ,LastLSN numeric(25,0)
+ ,CheckpointLSN numeric(25,0)
+ ,DatabaseBackupLSN numeric(25,0)
+ ,DifferentialBaseLSN numeric(25,0)
+ ,RecoveryForkID uniqueidentifier
+ ,FirstRecoveryForkID uniqueidentifier
+ ,ForkPointLSN numeric(25,0)
+ );
+
+IF OBJECT_ID (N'tempdb.dbo.#ListDatabasePath', N'U') IS NOT NULL DROP TABLE #ListDatabasePath;
+CREATE TABLE #ListDatabasePath (id int identity(1,1), dbName nvarchar(max) NULL, FullPath nvarchar(max) NULL, DiffPath nvarchar(max) NULL 
+                                 , dotBak nvarchar(max) NULL, dotBakDate datetime2 null, dotDiff nvarchar(max) NULL, dotDiffDate datetime2, RestoreDB nvarchar(max) null);
+IF OBJECT_ID (N'tempdb.dbo.#dbList', N'U') IS NOT NULL DROP TABLE #dbList;
+CREATE TABLE #dbList ( [name] nvarchar(max));
+
+INSERT INTO #ListDatabasePath VALUES (@dbNmSource, null, null, null, null, null, null, null);
+INSERT INTO #dbList SELECT dbName FROM #ListDatabasePath;
+	   
+DECLARE @dbNameCurr varchar(max);
+DECLARE db_curlist CURSOR FOR SELECT name FROM #dbList;
+OPEN db_curlist;
+FETCH NEXT FROM db_curlist INTO @dbNameCurr;
+WHILE @@FETCH_STATUS = 0 
+      BEGIN
+	   --get the correct file path for each server
+	   BEGIN TRAN
+	   UPDATE #ListDatabasePath 
+	   SET FullPath = @backupPathFull+'\'+@liveServerName+'\'+@dbNameCurr+'\FULL\'
+	    ,  DiffPath = @backupPathDiff+'\'+@liveServerName+'\'+@dbNameCurr+'\DIFF\'
+	   WHERE dbName = @dbNameCurr; 
+	   COMMIT TRAN
+	  FETCH NEXT FROM db_curlist INTO @dbNameCurr;
+      END
+CLOSE db_curlist;
+DEALLOCATE db_curlist;
+
+
+--within this cursor we will retreive all details for the files available and select only last full and last diff for each database and 
+--and run the backup
+declare @dirTreeFullFolder nvarchar(max);--path to the folder containing the backup files
+declare @dirTreeDiffFolder nvarchar(max);--path to the folder containing the backup files
+
+DECLARE db_cur CURSOR FOR SELECT name FROM #dbList;
+OPEN db_cur;
+FETCH NEXT FROM db_cur INTO @dbNameCurr;
+WHILE @@FETCH_STATUS = 0 
+      BEGIN
+	   --get the full physical files
+	   SELECT @dirTreeFullFolder = FullPath FROM #ListDatabasePath where dbName = @dbNameCurr;
+	   CREATE TABLE #dirFullTree ( Id int identity(1,1), SubDirectory nvarchar(255), Depth smallint, FileFlag bit, --ParentDirectoryID int  
+	   )
+	   SET @dirFullTree = N'master.dbo.xp_dirtree '''+RTRIM(@dirTreeFullFolder)+''',1,1';
+       BEGIN TRY 
+       INSERT INTO #dirFullTree (SubDirectory, Depth, FileFlag) EXEC(@dirFullTree); 
+	   END TRY 
+	   BEGIN CATCH 
+	      DROP table #dirFullTree;
+	      print 'dirtree Full to get a list of files in the specified path has failed' 
+	      print ERROR_MESSAGE() 
+	   END CATCH 	
+
+	   select @dbNameCurr as dbName, @dirTreeFullFolder as FilePath, subdirectory as FileName, (CAST(LEFT(RIGHT(subdirectory, 19), 8) as bigint)) as database_id into #dirFullFiles from #dirFullTree;
+
+  	   --get the diff physical files
+	   SELECT @dirTreeDiffFolder = DiffPath FROM #ListDatabasePath where dbName = @dbNameCurr;
+	   CREATE TABLE #dirDiffTree ( Id int identity(1,1), SubDirectory nvarchar(255), Depth smallint, FileFlag bit, --ParentDirectoryID int  
+	   )
+	   SET @dirDiffTree = N'master.dbo.xp_dirtree '''+RTRIM(@dirTreeDiffFolder)+''',1,1';
+       BEGIN TRY 
+       INSERT INTO #dirDiffTree (SubDirectory, Depth, FileFlag) EXEC(@dirDiffTree);
+	   END TRY 
+	   BEGIN CATCH 
+	   DROP table #dirDiffTree;
+	   print 'dirtree Diff to get a list of files in the specified path has failed' 
+	   print ERROR_MESSAGE() 
+	   END CATCH
+	    
+	   select @dbNameCurr as dbName,  @dirTreeDiffFolder as FilePath, subdirectory as FileName, (CAST(LEFT(RIGHT(subdirectory, 19), 8) as bigint)) as database_id into #dirDiffFiles from #dirDiffTree;
+
+	   --run headeronly for full backup
+	   declare @headerOnly nvarchar(max);
+	   declare @bakFile nvarchar(max);
+	   declare @bakFileName nvarchar(max);
+
+		DECLARE @curdbFileFull nvarchar(max);
+		DECLARE db_fullcur CURSOR FOR SELECT database_id FROM #dirFullFiles;
+		OPEN db_fullcur;
+		FETCH NEXT FROM db_fullcur INTO @curdbFileFull;
+		WHILE @@FETCH_STATUS = 0 
+				BEGIN
+					SELECT @bakFile = FilePath, @bakFileName = FileName from #dirFullFiles where database_id = @curdbFileFull;
+					SET @headerOnly = N'RESTORE HEADERONLY FROM DISK ='''+@bakFile+@bakFileName+'''';
+					BEGIN TRY 
+						INSERT INTO #headerOnly EXEC(@headerOnly); 
+							--save the backup info onto fullbackup table									
+							INSERT INTO #fullBackup 
+			                        (IsDamaged,HasIncompleteMetaData,fName,BackupType,BackupStartDate,FirstLSN,LastLSN,DifferentialBaseLSN,DatabaseBackupLSN,CheckpointLSN,RecoveryForkID,FirstRecoveryForkID,ForkPointLSN )
+			                SELECT IsDamaged,HasIncompleteMetaData,@bakFile+@bakFileName,BackupType,BackupStartDate,FirstLSN,LastLSN,DifferentialBaseLSN,DatabaseBackupLSN,CheckpointLSN,RecoveryForkID,FirstRecoveryForkID,ForkPointLSN
+			                FROM #headerOnly;
+							TRUNCATE TABLE #headerOnly;
+							--select * from #fullBackup
+					END TRY 
+					BEGIN CATCH 
+					       	SELECT '!!!! Something went wrong whilst checking the database file'
+	                        SELECT ERROR_MESSAGE(), ERROR_NUMBER()  
+							print 'The BACKUP FILE '+@curdbFileFull+' cannot be checked, please, review the log file.'   
+					END CATCH 
+		FETCH NEXT FROM db_fullcur INTO @curdbFileFull; 
+		END 
+		CLOSE db_fullcur; 
+		DEALLOCATE db_fullcur; 
+
+--run headeronly for DIFF backup
+        DECLARE @curdbFileDiff nvarchar(max);
+		DECLARE db_diffcur CURSOR FOR SELECT database_id FROM #dirDiffFiles;
+		OPEN db_diffcur;
+		FETCH NEXT FROM db_diffcur INTO @curdbFileDiff;
+		WHILE @@FETCH_STATUS = 0 
+				BEGIN
+						SELECT @bakFile = FilePath, @bakFileName = FileName  from #dirDiffFiles where database_id = @curdbFileDiff;
+						SET @headerOnly = N'RESTORE HEADERONLY FROM DISK ='''+@bakFile+@bakFileName+'''';						   	
+						BEGIN TRY 
+							INSERT INTO #headerOnly EXEC(@headerOnly);      
+							INSERT INTO #diffBackup 
+							   (IsDamaged,HasIncompleteMetaData,fName,BackupType,BackupStartDate,FirstLSN,LastLSN,DifferentialBaseLSN,DatabaseBackupLSN,CheckpointLSN,RecoveryForkID,FirstRecoveryForkID ,ForkPointLSN )
+						    SELECT IsDamaged,HasIncompleteMetaData,@bakFile+@bakFileName,BackupType,BackupStartDate,FirstLSN,LastLSN,DifferentialBaseLSN,DatabaseBackupLSN,CheckpointLSN,RecoveryForkID,FirstRecoveryForkID,ForkPointLSN
+							FROM #headerOnly;
+							TRUNCATE TABLE #headerOnly;
+						END TRY
+						BEGIN CATCH 
+						    SELECT '!!!! Something went wrong whilst checking the database file'
+	                        SELECT ERROR_MESSAGE(), ERROR_NUMBER()  
+				     		print 'The BACKUP FILE '+@curdbFileDiff+' cannot be checked, please, review the log file.'   
+						END CATCH 
+			FETCH NEXT FROM db_diffcur INTO @curdbFileDiff; 
+			END 
+			CLOSE db_diffcur; 
+			DEALLOCATE db_diffcur;  
+
+	  declare @FileName nvarchar(max);
+	  declare @isDamaged int;
+	  declare @hasIncompMetaData int; 
+	  declare @databaseBackupLSN numeric(25,0);
+	  declare @checkpointLSN numeric(25,0);
+	  declare @dotBakDate datetime;
+	  declare @countFiles int;
+	  declare @latestFull datetime;
+	  declare @latestDiff datetime;
+	  declare @fileListOnly nvarchar(max);
+	  DECLARE @ln as nvarchar(128); --From Restore FileListOnly 
+      DECLARE @pn as nvarchar(255); --From Restore FileListOnly 
+	  DECLARE @maxID as int;
+	  DECLARE @i as int;
+	  DECLARE @strMOVE as nvarchar(max) --From Restore FileListOnly 
+	  DECLARE @strDataFileFolder as nvarchar(max) = '';
+	  DECLARE @strLogFileFolder as nvarchar(max) = '';
+	  DECLARE @databaseID int;
+	  
+	  set @countFiles = 0;  
+	  select @countFiles = count(*) from #fullBackup where isDamaged = 0 and hasIncompleteMetaData = 0;
+	  select @latestFull = max(BackupStartDate) from #fullBackup;
+	  
+	  IF (@countFiles = 0)
+	         BEGIN
+	            print @dbNameCurr;
+				print 'full back up is damaged, no restore available';
+							              
+	         END
+	   ELSE IF (@countFiles > 0) 
+	             BEGIN
+	                select top 1 @FileName = fname, @isDamaged = IsDamaged, @hasIncompMetaData = HasIncompleteMetaData, @checkpointLSN = checkpointLSN, @dotBakDate = BackupStartDate 
+					from #fullBackup where isDamaged = 0 and hasIncompleteMetaData = 0 order by BackupStartDate desc;
+
+					SET @fileListOnly = N'RESTORE FILELISTONLY FROM DISK ='''+@FileName+'''';
+					INSERT INTO #fileListOnly EXEC(@fileListOnly);
+					
+					--select logicalName, PhysicalName, 
+					--RTRIM(RIGHT(PhysicalName,CHARINDEX ('\',REVERSE(PhysicalName))-1)) as boh
+					--, CHARINDEX ('\',REVERSE(PhysicalName))
+					--, LEN(PhysicalName)
+					--, LEFT(PhysicalName,CHARINDEX ('\',REVERSE(PhysicalName))-1)
+					--from #fileListOnly;
+					
+					IF (@NewDB = 'N') BEGIN
+							--get the current path for mdf, ldf and fullText files
+							select @databaseID = database_id from sys.databases where name = @dbNmTarget;
+
+							SELECT @strDataFileFolder = LEFT( physical_name, LEN(physical_name) - CHARINDEX('\', REVERSE(physical_name))+1) 
+							FROM master.sys.master_files 
+							WHERE database_id = @databaseID and file_id = 1;
+
+							SELECT @strLogFileFolder = LEFT( physical_name, LEN(physical_name) - CHARINDEX('\', REVERSE(physical_name))+1) 
+							FROM master.sys.master_files 
+							WHERE database_id = @databaseID and file_id = 2;
+					END
+
+					IF (@NewDB = 'Y') BEGIN
+					--because this is a new database will take the path for log and data from another existing database...
+					--I could have checked the default settings... but you never known if the setting is still valid...
+					        select @databaseID = max(database_ID) from sys.databases;
+
+							SELECT @strDataFileFolder = LEFT( physical_name, LEN(physical_name) - CHARINDEX('\', REVERSE(physical_name))+1) 
+							FROM master.sys.master_files 
+							WHERE database_id = @databaseID and file_id = 1;
+
+							SELECT @strLogFileFolder = LEFT( physical_name, LEN(physical_name) - CHARINDEX('\', REVERSE(physical_name))+1) 
+							FROM master.sys.master_files 
+							WHERE database_id = @databaseID and file_id = 2;
+					END
+
+					--select RTRIM(@strDataFileFolder), @strLogFileFolder;
+
+					UPDATE #fileListOnly 
+					SET LogicalName  = N'MOVE '''+LogicalName+''' ' 
+						,PhysicalName = N'TO '''+RTRIM(@strDataFileFolder)+RTRIM(RIGHT(PhysicalName,CHARINDEX ('\',REVERSE(PhysicalName))-1))+''','
+					WHERE Type = 'D'       
+					--Note. the path to data and logs may be different 
+					UPDATE #fileListOnly 
+					SET LogicalName  = N'MOVE '''+LogicalName+''' ' 
+						,PhysicalName = N'TO '''+RTRIM(@strLogFileFolder)+RTRIM(RIGHT(PhysicalName,CHARINDEX ('\',REVERSE(PhysicalName))-1))+''','
+					WHERE Type = 'L' 
+					--full-text, if exist
+					UPDATE #fileListOnly 
+					SET LogicalName  = N'MOVE '''+LogicalName+''' ' 
+						,PhysicalName = N'TO '''+RTRIM(@strDataFileFolder)+RTRIM(RIGHT(PhysicalName,CHARINDEX ('\',REVERSE(PhysicalName))-1))+''',' 
+					WHERE Type = 'F' 
+					  
+					--SELECT * FROM #fileListOnly;
+
+					SELECT @maxID = count(LogicalName) FROM #fileListOnly;
+					SET @strMOVE ='';
+					SET @i = 1;
+					--while i < 4 ==> 1<4, 2<4, 3<4 
+					WHILE ( @i < @maxID ) 
+							BEGIN
+							SELECT @ln=LogicalName, @pn=PhysicalName 
+							FROM #fileListOnly WHERE id = @i 
+							SET @strMOVE = @strMOVE+@ln+@pn 
+							SET @i=@i+1 
+						END
+					--i=4 
+					--add the last bit to the string move 
+					SELECT @ln=LogicalName, @pn=PhysicalName FROM #fileListOnly WHERE id = @i
+					SET @strMOVE = @strMOVE+@ln+@pn;
+					SET @strMOVE = REPLACE(@strMOVE,'.','.');
+					--SELECT @strMOVE;
+
+					IF (@latestFull = @dotBakDate) 
+					     BEGIN
+						   UPDATE #ListDatabasePath SET dotBak = @FileName, dotBakDate = @dotBakDate WHERE dbName = @dbNameCurr;
+                         END
+					ELSE BEGIN
+						   UPDATE #ListDatabasePath SET dotBak = @FileName, dotBakDate = @dotBakDate WHERE dbName = @dbNameCurr;
+						   print 'WARNING: Latest backup was damaged, the latest VALID backup is from... '; 
+						   print @dotBakDate;
+     					 END
+	             END 
+	  --loop the diff backup validating them all, just in case the latest is damaged...
+	  -- select latest diff from #diffBackup
+	  set @FileName = '';
+	  set @dotBakDate = NULL;
+	  set @countFiles = 0;  
+	  select @countFiles = count(*) from #diffBackup where isDamaged = 0 and hasIncompleteMetaData = 0;
+	  select @latestDiff = max(BackupStartDate) from #diffBackup;
+
+	  IF (@countFiles = 0) --no diff backup only full backup
+	         BEGIN
+			    UPDATE #ListDatabasePath 
+				SET dotDiff = N'RESTORE DATABASE '+@dbNmTarget+N' WITH RECOVERY;', dotDiffDate = NULL 
+				WHERE dbName = @dbNameCurr;
+
+				IF (@NewDB = 'N') BEGIN
+					UPDATE #ListDatabasePath 
+					SET RestoreDB = N'ALTER DATABASE '+@dbNmTarget+N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE;'+N'RESTORE DATABASE '+@dbNmTarget+N' FROM  DISK = '''+dotBak+''''+N' WITH NORECOVERY, REPLACE,'+@strMOVE+' FILE = 1, STATS = 50; '+dotDiff+N' ALTER DATABASE '+@dbNmTarget+' SET MULTI_USER WITH ROLLBACK IMMEDIATE;'
+					WHERE dbName = @dbNameCurr;
+				END
+                IF (@NewDB = 'Y') BEGIN
+					UPDATE #ListDatabasePath 
+					SET RestoreDB = N'RESTORE DATABASE '+@dbNmTarget+N' FROM  DISK = '''+dotBak+''''+N' WITH NORECOVERY, REPLACE,'+@strMOVE+' FILE = 1, STATS = 50; '+dotDiff+N' ALTER DATABASE '+@dbNmTarget+' SET MULTI_USER WITH ROLLBACK IMMEDIATE;'
+					WHERE dbName = @dbNameCurr;
+				END
+					print 'All diff back up are damaged or no diff backup was ever taken'	                     
+	         END
+	  ELSE IF (@countFiles > 0) 
+	             BEGIN
+	                select top 1 @FileName = fname, @isDamaged = IsDamaged, @hasIncompMetaData = HasIncompleteMetaData, @databaseBackupLSN = DatabaseBackupLSN, @dotBakDate = BackupStartDate 
+					from #diffBackup where isDamaged = 0 and hasIncompleteMetaData = 0 and @checkpointLSN = DatabaseBackupLSN order by BackupStartDate desc;
+					IF (@latestDiff = @dotBakDate) 
+						 BEGIN
+						   UPDATE #ListDatabasePath SET dotDiff = @FileName, dotDiffDate = @dotBakDate WHERE dbName = @dbNameCurr;
+                         END
+					ELSE BEGIN
+						   UPDATE #ListDatabasePath SET dotDiff = @FileName, dotDiffDate = @dotBakDate WHERE dbName = @dbNameCurr;
+						   print 'WARNING: Latest diff backup was damaged, the latest valid diff backup is from ' 
+						   print @dotBakDate;
+     					 END
+	             END 
+	  IF (@countFiles > 0) --we have diff files
+	      BEGIN
+		  		set @isDamaged = '-1';
+				set @hasIncompMetaData ='-1';
+				select top 1 @FileName = fname, @isDamaged = IsDamaged, @hasIncompMetaData = HasIncompleteMetaData, @databaseBackupLSN = DatabaseBackupLSN, @dotBakDate = BackupStartDate 
+				from #diffBackup where @checkpointLSN = DatabaseBackupLSN order by BackupStartDate desc;
+
+				IF (@isDamaged = 0 and @hasIncompMetaData = 0)  --the diff backup is not damaged and it matched the LSN from the full backup, so it is a valid diff for our full backup!
+					BEGIN
+					  UPDATE #ListDatabasePath 
+					  SET dotDiff = N'RESTORE DATABASE '+@dbNmTarget+N' FROM  DISK = '''+@fileName+''''+N' WITH RECOVERY, FILE = 1, STATS = 50;'
+						  , dotDiffDate = @dotBakDate WHERE dbName = @dbNameCurr;
+					END
+				ELSE IF (@isDamaged = 1 or @hasIncompMetaData = 1) 
+					BEGIN
+		      			print 'Latest diff backup is damaged, one valid diff file was found though... '
+						print @FileName 
+					END
+				ELSE IF (@isDamaged = -1 or @hasIncompMetaData = -1) --no diff backup was found
+				    BEGIN
+					   UPDATE #ListDatabasePath SET dotDiff = N'RESTORE DATABASE '+@dbNmTarget+N' WITH RECOVERY;', dotDiffDate = NULL WHERE dbName = @dbNameCurr;
+					END
+				
+				IF (@NewDB = 'N') BEGIN
+					UPDATE #ListDatabasePath 
+					SET RestoreDB = N'ALTER DATABASE '+@dbNmTarget+N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE;'+N'RESTORE DATABASE '+@dbNmTarget+N' FROM  DISK = '''+dotBak+''''+N' WITH NORECOVERY, REPLACE,'+@strMOVE+' FILE = 1, STATS = 50; '
+									+dotDiff+N' ALTER DATABASE '+@dbNmTarget+' SET MULTI_USER WITH ROLLBACK IMMEDIATE;'
+					WHERE dbName = @dbNameCurr;
+				END
+				IF (@NewDB = 'Y') BEGIN
+					UPDATE #ListDatabasePath 
+					SET RestoreDB = N'RESTORE DATABASE '+@dbNmTarget+N' FROM  DISK = '''+dotBak+''''+N' WITH NORECOVERY, REPLACE,'+@strMOVE+' FILE = 1, STATS = 50; '
+									+dotDiff+N' ALTER DATABASE '+@dbNmTarget+' SET MULTI_USER WITH ROLLBACK IMMEDIATE;'
+					WHERE dbName = @dbNameCurr;
+				END
+
+         END
+		declare @RestoreDBscript nvarchar(max);
+		select @RestoreDBscript = RestoreDB from #ListDatabasePath where dbName = @dbNameCurr;
+
+		BEGIN TRY
+			EXECUTE sp_executeSQL @RestoreDBScript
+			SELECT DbName, ISNULL(dotdiffDate, dotbakdate) as RestoredDate, RestoreDB as RestoreScript from #ListDatabasePath where dbName = @dbNameCurr;
+		END TRY
+		BEGIN CATCH
+			SELECT '!!!! Something went wrong whilst restoring database'
+			SELECT ERROR_MESSAGE(), ERROR_NUMBER() 
+			SELECT @RestoreDBScript;
+		END CATCH
+          
+
+	  	--these drop must be here when the all process is working
+	   DROP table #dirFullTree;
+       DROP table #dirDiffTree;
+	   DROP table #dirFullFiles;
+	   DROP Table #dirDiffFiles;
+
+	   TRUNCATE TABLE #fullBackup;
+	   TRUNCATE TABLE #diffBackup;
+
+    FETCH NEXT FROM db_cur INTO @dbNameCurr;
+   END
+CLOSE db_cur;
+DEALLOCATE db_cur;
+
+select * from #ListDatabasePath;
+drop table #ListDatabasePath;
+--select 'process completed, >>>> SELECT * FROM #ListDatabasePath <<<< to review what was restored'
